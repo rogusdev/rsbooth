@@ -55,8 +55,7 @@ and the moment the stored frame was captured, taken from the driver's frame
 timestamp where the backend provides one. A negative lag means the frame was
 captured *before* zero. Against the mock camera, which models a 1.2s
 reconfiguration, that is 15-65ms armed versus ~1250ms unarmed. The booth also
-logs a warning on screen if a real capture is ever more than 250ms either side
-of zero.
+logs a warning if a real capture is ever more than 250ms either side of zero.
 
 The camera thread only pulls frames off the driver; a separate thread decodes
 the newest one for the preview and skips any it cannot keep up with. On a slow
@@ -169,8 +168,10 @@ then `~/.config/rsbooth/rsbooth.toml`.
 Keyboard: **Space/Enter** starts a session, **Esc** cancels one. **Esc** on the
 idle screen quits back to the desktop.
 
-`RSBOOTH_LOG` sets the log filter (default `rsbooth=info,warn`); an invalid
-filter is an error.
+Nothing diagnostic is drawn on screen. Camera details, warnings and the files
+each session wrote go to stdout and are appended to `general.log_file`
+(default `<output_dir>/rsbooth.log`). `RSBOOTH_LOG` sets the log filter
+(default `rsbooth=info,warn`); an invalid filter is an error.
 
 ## Configuration
 
@@ -179,8 +180,9 @@ The whole file is validated at startup - including whether every layout
 leaves room for its cells and every overlay exists - so a bad config fails
 before anyone poses, not after.
 
-- `[general]` - `output_dir`, `idle_text`, and `font` (a TTF/OTF path used for
-  footer text; footer text is skipped with a warning when it is unset).
+- `[general]` - `output_dir`, `idle_text`, `font` (a TTF/OTF path used for
+  footer text; footer text is skipped with a warning when it is unset), and
+  `log_file`.
 - `[window]` - `fullscreen`, `hide_cursor`, `size`, `flash`.
 - `[camera]` - `backend` (`webcam` or `mock`), `index`, `preview_resolution`,
   `capture_resolution`, `format`, `warmup_frames`, `capture_discard_frames`,

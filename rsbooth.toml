@@ -12,6 +12,9 @@ idle_text = "Touch to start"
 # with a warning when this is unset or unreadable. This path is where Debian
 # and Raspberry Pi OS install DejaVu Sans Bold.
 font = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+# Everything logged - camera details, warnings, the files each session wrote -
+# is appended here. Defaults to <output_dir>/rsbooth.log.
+# log_file = "~/Pictures/rsbooth/rsbooth.log"
 
 [window]
 fullscreen = false

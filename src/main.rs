@@ -9,11 +9,16 @@ mod layout;
 mod session;
 mod ui;
 
-use std::path::PathBuf;
+use std::fs::OpenOptions;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::camera::{CameraEvent, CameraHandle, Capture};
 use crate::config::{Config, UserDirs};
@@ -90,26 +95,67 @@ fn main() -> Result<()> {
         config: dirs::config_dir(),
     };
 
-    let log_filter = tracing_subscriber::EnvFilter::try_new(&log_filter)
+    let log_filter = EnvFilter::try_new(&log_filter)
         .with_context(|| format!("invalid {LOG_ENV_VAR} filter {log_filter:?}"))?;
-    tracing_subscriber::fmt().with_env_filter(log_filter).init();
 
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Run) {
-        Command::Run => run_booth(cli.config, &user_dirs),
-        Command::Capture { mode, no_arm } => {
-            capture_headless(cli.config, &user_dirs, mode.as_deref(), !no_arm)
+        Command::Run => {
+            let (path, config) = load_config(cli.config, &user_dirs)?;
+            init_logging(log_filter, Some(&config.general.log_path()))?;
+            tracing::info!("loaded {}", path.display());
+            run_booth(config)
         }
-        Command::ListCameras => list_cameras(),
-        Command::InitConfig { force } => init_config(&user_dirs, force),
+        Command::Capture { mode, no_arm } => {
+            let (path, config) = load_config(cli.config, &user_dirs)?;
+            init_logging(log_filter, Some(&config.general.log_path()))?;
+            tracing::info!("loaded {}", path.display());
+            capture_headless(&path, config, mode.as_deref(), !no_arm)
+        }
+        Command::ListCameras => {
+            init_logging(log_filter, None)?;
+            list_cameras()
+        }
+        Command::InitConfig { force } => {
+            init_logging(log_filter, None)?;
+            init_config(&user_dirs, force)
+        }
     }
 }
 
-fn run_booth(config_path: Option<PathBuf>, user_dirs: &UserDirs) -> Result<()> {
+fn load_config(config_path: Option<PathBuf>, user_dirs: &UserDirs) -> Result<(PathBuf, Config)> {
     let path = config::resolve_config_path(config_path, user_dirs)?;
     let config = Config::load(&path, user_dirs.home.as_deref())?;
-    tracing::info!("loaded {}", path.display());
+    Ok((path, config))
+}
 
+/// Log to stdout, and also append to `log_file` when given.
+fn init_logging(filter: EnvFilter, log_file: Option<&Path>) -> Result<()> {
+    let file_layer = log_file
+        .map(|path| -> Result<_> {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
+            let file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .with_context(|| format!("opening log file {}", path.display()))?;
+            Ok(tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(Mutex::new(file)))
+        })
+        .transpose()?;
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(file_layer)
+        .init();
+    Ok(())
+}
+
+fn run_booth(config: Config) -> Result<()> {
     let viewport = egui_viewport(&config);
     let options = eframe::NativeOptions {
         viewport,
@@ -185,19 +231,17 @@ fn init_config(user_dirs: &UserDirs, force: bool) -> Result<()> {
 /// Mirrors the UI's ordering - arm, wait out the countdown, shoot - so this is
 /// also how the shutter lag is measured on real hardware.
 fn capture_headless(
-    config_path: Option<PathBuf>,
-    user_dirs: &UserDirs,
+    config_path: &Path,
+    config: Config,
     mode_id: Option<&str>,
     arm: bool,
 ) -> Result<()> {
-    let path = config::resolve_config_path(config_path, user_dirs)?;
-    let config = Config::load(&path, user_dirs.home.as_deref())?;
     let mode = match mode_id {
         Some(id) => config
             .modes
             .iter()
             .find(|mode| mode.id == id)
-            .with_context(|| format!("no mode with id {id:?} in {}", path.display()))?,
+            .with_context(|| format!("no mode with id {id:?} in {}", config_path.display()))?,
         None => &config.modes[0],
     }
     .clone();
@@ -237,10 +281,13 @@ fn capture_headless(
     .recv()
     .context("the processing thread died")??;
 
-    for path in &processed.capture_paths {
+    for path in processed
+        .capture_paths
+        .iter()
+        .chain([&processed.sheet_path])
+    {
         println!("wrote {}", path.display());
     }
-    println!("wrote {}", processed.sheet_path.display());
     Ok(())
 }
 

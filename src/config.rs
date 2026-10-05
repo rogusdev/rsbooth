@@ -19,6 +19,9 @@ pub const APP_DIR_NAME: &str = "rsbooth";
 /// Config shipped with the binary, written out by `rsbooth init-config`.
 pub const DEFAULT_CONFIG_TOML: &str = include_str!("../rsbooth.toml");
 
+/// Log file name under `output_dir` when `general.log_file` is unset.
+pub const DEFAULT_LOG_FILE_NAME: &str = "rsbooth.log";
+
 /// Frames pulled and thrown away right after the camera is armed, so
 /// auto-exposure and auto-white-balance settle during the countdown rather
 /// than at the shutter.
@@ -62,6 +65,10 @@ pub struct General {
     /// skipped (with a warning) when unset or unreadable.
     #[serde(default)]
     pub font: Option<PathBuf>,
+    /// Appended to with everything logged: camera details, warnings, the files
+    /// each session wrote. Defaults to `<output_dir>/rsbooth.log`.
+    #[serde(default)]
+    pub log_file: Option<PathBuf>,
 }
 
 impl General {
@@ -71,6 +78,12 @@ impl General {
     fn default_idle_text() -> String {
         "Touch to start".to_string()
     }
+
+    pub fn log_path(&self) -> PathBuf {
+        self.log_file
+            .clone()
+            .unwrap_or_else(|| self.output_dir.join(DEFAULT_LOG_FILE_NAME))
+    }
 }
 
 impl Default for General {
@@ -79,6 +92,7 @@ impl Default for General {
             output_dir: Self::default_output_dir(),
             idle_text: Self::default_idle_text(),
             font: None,
+            log_file: None,
         }
     }
 }
@@ -358,6 +372,11 @@ impl Config {
             .font
             .as_deref()
             .map(|font| expand_tilde(font, home));
+        config.general.log_file = config
+            .general
+            .log_file
+            .as_deref()
+            .map(|log_file| expand_tilde(log_file, home));
         for mode in &mut config.modes {
             mode.overlay = mode
                 .overlay

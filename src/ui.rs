@@ -46,9 +46,6 @@ const MAX_ACCEPTABLE_SHUTTER_LAG: Duration = Duration::from_millis(250);
 /// switch.
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Status lines kept for the corner log.
-const STATUS_LINES: usize = 4;
-
 /// How long an error stays on screen before the booth returns to idle.
 const ERROR_DISPLAY: Duration = Duration::from_secs(8);
 
@@ -137,9 +134,7 @@ pub struct BoothApp {
     processing: Option<Receiver<Result<Processed>>>,
     last_session_dir: Option<PathBuf>,
 
-    camera_status: String,
     camera_fatal: Option<String>,
-    status_lines: VecDeque<String>,
     flash_until: Option<Instant>,
 }
 
@@ -165,24 +160,13 @@ impl BoothApp {
             sheet_texture: None,
             processing: None,
             last_session_dir: None,
-            camera_status: "starting the camera...".to_string(),
             camera_fatal: None,
-            status_lines: VecDeque::new(),
             flash_until: None,
         })
     }
 
     fn mode(&self) -> &Mode {
         &self.config.modes[self.active_mode.min(self.config.modes.len() - 1)]
-    }
-
-    fn push_status(&mut self, line: impl Into<String>) {
-        let line = line.into();
-        tracing::info!("{line}");
-        self.status_lines.push_back(line);
-        while self.status_lines.len() > STATUS_LINES {
-            self.status_lines.pop_front();
-        }
     }
 
     fn start_session(&mut self, mode_index: usize) {
@@ -305,10 +289,7 @@ impl BoothApp {
     fn drain_camera_events(&mut self, ctx: &egui::Context) {
         for event in self.camera.poll_events() {
             match event {
-                CameraEvent::Ready(description) => {
-                    self.camera_status = description.clone();
-                    self.push_status(format!("camera: {description}"));
-                }
+                CameraEvent::Ready(description) => tracing::info!("camera: {description}"),
                 CameraEvent::Armed { description, took } => {
                     tracing::info!("camera armed at {description} in {took:?}");
                 }
@@ -316,7 +297,7 @@ impl BoothApp {
                 CameraEvent::CaptureFailed(error) => {
                     self.fail(format!("Capture failed: {error}"));
                 }
-                CameraEvent::Warning(warning) => self.push_status(warning),
+                CameraEvent::Warning(warning) => tracing::warn!("camera: {warning}"),
                 CameraEvent::Fatal(error) => {
                     self.camera_fatal = Some(error.clone());
                     // Drop the last frame so the backdrop says why it stopped.
@@ -340,9 +321,7 @@ impl BoothApp {
         let offset_ms = capture.offset_ms(shutter_at);
         tracing::info!("shutter lag: {offset_ms:+.0}ms");
         if offset_ms.abs() > MAX_ACCEPTABLE_SHUTTER_LAG.as_secs_f32() * 1000.0 {
-            self.push_status(format!(
-                "photo taken {offset_ms:+.0}ms from the end of the countdown"
-            ));
+            tracing::warn!("photo taken {offset_ms:+.0}ms from the end of the countdown");
         }
         let slot = index as usize;
         let texture = upload_texture(
@@ -386,11 +365,13 @@ impl BoothApp {
                     "sheet",
                     &processed.preview,
                 ));
-                self.push_status(format!(
-                    "saved {} photo(s) to {}",
-                    processed.capture_paths.len() + 1,
-                    processed.directory.display()
-                ));
+                for path in processed
+                    .capture_paths
+                    .iter()
+                    .chain([&processed.sheet_path])
+                {
+                    tracing::info!("wrote {}", path.display());
+                }
                 self.last_session_dir = Some(processed.directory.clone());
                 self.state = State::Review {
                     until: Instant::now()
@@ -512,7 +493,6 @@ impl eframe::App for BoothApp {
             }
         }
         self.draw_flash(ui, rect);
-        self.draw_status(ui, rect);
         if self.config.window.hide_cursor {
             ctx.set_cursor_icon(egui::CursorIcon::None);
         }
@@ -818,20 +798,6 @@ impl BoothApp {
         let alpha = (remaining.as_secs_f32() / FLASH_DURATION.as_secs_f32()).clamp(0.0, 1.0);
         ui.painter()
             .rect_filled(rect, 0.0, Color32::from_white_alpha((alpha * 220.0) as u8));
-    }
-
-    fn draw_status(&self, ui: &egui::Ui, rect: Rect) {
-        let mut y = rect.bottom() - 8.0;
-        for line in self.status_lines.iter().rev() {
-            ui.painter().text(
-                pos2(rect.left() + 12.0, y),
-                Align2::LEFT_BOTTOM,
-                line,
-                FontId::proportional(16.0),
-                Color32::from_gray(150),
-            );
-            y -= 20.0;
-        }
     }
 
     fn cancel_button(&self, ui: &mut egui::Ui, rect: Rect) -> egui::Response {
