@@ -45,11 +45,19 @@ rotation = 0
 mirror = true
 
 [countdown]
-# Also the lead time the camera gets to switch to the capture format, so keep
-# this at 2 seconds or more unless preview and capture resolutions match.
+# Countdown before the first shot. Also the lead time the camera gets to switch
+# to the capture format, so keep this at 2 seconds or more unless preview and
+# capture resolutions match.
 seconds = 3
-between_captures_seconds = 1.5
+# The time between shots is these two added together: the photo just taken
+# stays on screen for capture_review_seconds, then between_captures_seconds
+# counts down to the next shot.
 capture_review_seconds = 1.0
+between_captures_seconds = 1.5
+# After the last shot every photo is shown and guests can tap any to retake.
+# Untouched for this long, the photos are saved as they are.
+retake_choice_seconds = 30.0
+# How long the finished sheet stays on screen before returning to idle.
 review_seconds = 15.0
 
 # Modes are shown as buttons on the selection screen, in this order.

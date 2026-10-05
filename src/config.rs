@@ -213,6 +213,10 @@ pub struct Countdown {
     /// How long each capture is shown right after it is taken.
     #[serde(default = "Countdown::default_capture_review")]
     pub capture_review_seconds: f32,
+    /// How long the choose screen waits, since the last tap, before saving the
+    /// photos as they are.
+    #[serde(default = "Countdown::default_retake_choice")]
+    pub retake_choice_seconds: f32,
     /// How long the finished sheet stays on screen before returning to idle.
     #[serde(default = "Countdown::default_review")]
     pub review_seconds: f32,
@@ -228,6 +232,9 @@ impl Countdown {
     fn default_capture_review() -> f32 {
         1.0
     }
+    fn default_retake_choice() -> f32 {
+        30.0
+    }
     fn default_review() -> f32 {
         15.0
     }
@@ -239,6 +246,7 @@ impl Default for Countdown {
             seconds: Self::default_seconds(),
             between_captures_seconds: Self::default_between(),
             capture_review_seconds: Self::default_capture_review(),
+            retake_choice_seconds: Self::default_retake_choice(),
             review_seconds: Self::default_review(),
         }
     }
@@ -406,6 +414,10 @@ impl Config {
             (
                 "capture_review_seconds",
                 self.countdown.capture_review_seconds,
+            ),
+            (
+                "retake_choice_seconds",
+                self.countdown.retake_choice_seconds,
             ),
             ("review_seconds", self.countdown.review_seconds),
         ] {

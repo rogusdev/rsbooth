@@ -2,10 +2,16 @@
 //!
 //! ```text
 //! Idle -> ModeSelect -> Countdown -> AwaitingCapture -> ShowCapture
-//!            ^                            |                 |
-//!            |                            +--- more shots --+
-//!            |                                              |
-//!          Review <- Processing <-------- last shot --------+
+//!                         ^                                |
+//!                         +---- more shots in the queue ---+
+//!                         |                                |
+//!                      retakes                         queue empty
+//!                         |                                |
+//!                         +------------- Choose <----------+
+//!                                          |
+//!                                     looks good
+//!                                          |
+//!               Idle <- Review <- Processing
 //! ```
 
 use std::collections::VecDeque;
@@ -17,7 +23,10 @@ use std::time::{Duration, Instant};
 use ab_glyph::FontVec;
 use anyhow::{Context, Result};
 use eframe::egui;
-use egui::{Align2, Color32, FontId, Rect, RichText, TextureHandle, TextureOptions, Vec2, pos2};
+use egui::{
+    Align2, Color32, FontId, Rect, RichText, Stroke, StrokeKind, TextureHandle, TextureOptions,
+    Vec2, pos2, vec2,
+};
 use image::RgbImage;
 
 use crate::camera::{CameraEvent, CameraHandle, Capture};
@@ -47,6 +56,9 @@ const ERROR_DISPLAY: Duration = Duration::from_secs(8);
 /// idle, so a walk-away does not leave the camera armed.
 const MODE_SELECT_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How long "Discard all" waits for its confirming second tap.
+const DISCARD_CONFIRM_WINDOW: Duration = Duration::from_secs(4);
+
 /// Frame pacing. The camera runs at 30fps; repainting a little faster keeps
 /// the countdown smooth without spinning the GPU.
 const REPAINT_INTERVAL: Duration = Duration::from_millis(16);
@@ -56,6 +68,7 @@ const FULL_UV: Rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
 
 const BACKGROUND: Color32 = Color32::from_rgb(12, 12, 16);
 const ACCENT: Color32 = Color32::from_rgb(255, 214, 102);
+const DANGER: Color32 = Color32::from_rgb(255, 120, 120);
 
 #[derive(Debug)]
 enum State {
@@ -80,6 +93,11 @@ enum State {
         index: u32,
         until: Instant,
     },
+    /// All photos taken; the guests mark any to retake. Saves them as they are
+    /// at `until`.
+    Choose {
+        until: Instant,
+    },
     /// Composing and saving on the worker thread.
     Processing,
     /// Showing the finished sheet.
@@ -100,11 +118,20 @@ pub struct BoothApp {
 
     /// Index into `config.modes` for the session in progress.
     active_mode: usize,
+    /// One per photo taken so far, in sheet order. A retake replaces its slot.
     captures: Vec<RgbImage>,
+    /// Screen-sized copies of `captures`, same order.
+    capture_textures: Vec<TextureHandle>,
+    /// Slots still to shoot in this round: every slot at first, then the
+    /// retakes.
+    shot_queue: VecDeque<u32>,
+    /// Per slot, whether it is marked for retake on the choose screen.
+    retake: Vec<bool>,
+    /// Set by a first tap on "Discard all"; a second tap before then discards.
+    discard_confirm_until: Option<Instant>,
 
     preview_texture: Option<TextureHandle>,
     preview_seq: u64,
-    capture_texture: Option<TextureHandle>,
     sheet_texture: Option<TextureHandle>,
 
     processing: Option<Receiver<Result<Processed>>>,
@@ -129,9 +156,12 @@ impl BoothApp {
             state: State::Idle,
             active_mode: 0,
             captures: Vec::new(),
+            capture_textures: Vec::new(),
+            shot_queue: VecDeque::new(),
+            retake: Vec::new(),
+            discard_confirm_until: None,
             preview_texture: None,
             preview_seq: 0,
-            capture_texture: None,
             sheet_texture: None,
             processing: None,
             last_session_dir: None,
@@ -157,20 +187,88 @@ impl BoothApp {
 
     fn start_session(&mut self, mode_index: usize) {
         self.active_mode = mode_index;
-        self.captures.clear();
-        self.capture_texture = None;
+        self.clear_session();
         self.sheet_texture = None;
+        self.shot_queue = (0..self.mode().captures).collect();
         // Arm now, so the stream reconfiguration happens while the countdown
         // runs instead of at the shutter.
         self.camera.arm();
-        self.state = State::Countdown {
-            index: 0,
-            ends_at: Instant::now() + Duration::from_secs(u64::from(self.config.countdown.seconds)),
+        self.next_shot(self.first_countdown());
+    }
+
+    /// Count down to the next queued shot, or move on to the choose screen
+    /// once the queue is empty.
+    fn next_shot(&mut self, countdown: Duration) {
+        match self.shot_queue.pop_front() {
+            Some(index) => {
+                self.state = State::Countdown {
+                    index,
+                    ends_at: Instant::now() + countdown,
+                };
+            }
+            None => self.choose_retakes(),
+        }
+    }
+
+    /// Countdown before the first shot of a round, which is also the lead time
+    /// the camera gets to arm.
+    fn first_countdown(&self) -> Duration {
+        Duration::from_secs(u64::from(self.config.countdown.seconds))
+    }
+
+    fn choose_retakes(&mut self) {
+        // Nothing to shoot unless a retake is asked for; give the preview
+        // format back meanwhile.
+        self.camera.disarm();
+        self.retake = vec![false; self.captures.len()];
+        self.state = State::Choose {
+            until: self.choice_deadline(),
         };
     }
 
-    fn cancel_session(&mut self) {
+    fn choice_deadline(&self) -> Instant {
+        Instant::now()
+            + Duration::from_secs_f32(self.config.countdown.retake_choice_seconds.max(0.0))
+    }
+
+    fn start_retakes(&mut self) {
+        self.shot_queue = (0..)
+            .zip(&self.retake)
+            .filter(|(_, marked)| **marked)
+            .map(|(index, _)| index)
+            .collect();
+        self.camera.arm();
+        self.next_shot(self.first_countdown());
+    }
+
+    fn clear_session(&mut self) {
         self.captures.clear();
+        self.capture_textures.clear();
+        self.shot_queue.clear();
+        self.retake.clear();
+        self.discard_confirm_until = None;
+    }
+
+    /// "Discard all" on the choose screen: the first tap asks for confirmation,
+    /// a second within [`DISCARD_CONFIRM_WINDOW`] drops every photo unsaved.
+    fn press_discard(&mut self) {
+        if self.discard_pending() {
+            self.cancel_session();
+        } else {
+            self.discard_confirm_until = Some(Instant::now() + DISCARD_CONFIRM_WINDOW);
+            self.state = State::Choose {
+                until: self.choice_deadline(),
+            };
+        }
+    }
+
+    fn discard_pending(&self) -> bool {
+        self.discard_confirm_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+
+    fn cancel_session(&mut self) {
+        self.clear_session();
         self.processing = None;
         self.camera.disarm();
         self.state = State::Idle;
@@ -179,7 +277,7 @@ impl BoothApp {
     fn fail(&mut self, message: impl Into<String>) {
         let message = message.into();
         tracing::error!("{message}");
-        self.captures.clear();
+        self.clear_session();
         self.camera.disarm();
         self.state = State::Error {
             message,
@@ -246,13 +344,20 @@ impl BoothApp {
                 "photo taken {offset_ms:+.0}ms from the end of the countdown"
             ));
         }
-        self.capture_texture = Some(upload_texture(
+        let slot = index as usize;
+        let texture = upload_texture(
             ctx,
-            self.capture_texture.take(),
+            self.capture_textures.get(slot).cloned(),
             "capture",
             &capture.preview,
-        ));
-        self.captures.push(capture.image);
+        );
+        if slot < self.captures.len() {
+            self.captures[slot] = capture.image;
+            self.capture_textures[slot] = texture;
+        } else {
+            self.captures.push(capture.image);
+            self.capture_textures.push(texture);
+        }
         if self.config.window.flash {
             self.flash_until = Some(Instant::now() + FLASH_DURATION);
         }
@@ -299,14 +404,13 @@ impl BoothApp {
     fn start_processing(&mut self) {
         let mode = self.mode().clone();
         let captures = std::mem::take(&mut self.captures);
+        self.clear_session();
         self.processing = Some(session::spawn_processing(ProcessRequest {
             mode,
             captures,
             output_dir: self.config.general.output_dir.clone(),
             font: self.font.clone(),
         }));
-        // The session is done shooting; give the preview format back.
-        self.camera.disarm();
         self.state = State::Processing;
     }
 
@@ -324,19 +428,12 @@ impl BoothApp {
             State::AwaitingCapture { shutter_at, .. } if now >= shutter_at + CAPTURE_TIMEOUT => {
                 self.fail("The camera did not return a photo");
             }
-            State::ShowCapture { index, until } if now >= until => {
-                if index + 1 < self.mode().captures {
-                    self.state = State::Countdown {
-                        index: index + 1,
-                        ends_at: now
-                            + Duration::from_secs_f32(
-                                self.config.countdown.between_captures_seconds.max(0.0),
-                            ),
-                    };
-                } else {
-                    self.start_processing();
-                }
+            State::ShowCapture { until, .. } if now >= until => {
+                self.next_shot(Duration::from_secs_f32(
+                    self.config.countdown.between_captures_seconds.max(0.0),
+                ));
             }
+            State::Choose { until } if now >= until => self.start_processing(),
             State::ModeSelect { until } if now >= until => self.cancel_session(),
             State::Review { until } if now >= until => self.state = State::Idle,
             State::Error { until, .. } if now >= until => self.state = State::Idle,
@@ -404,6 +501,7 @@ impl eframe::App for BoothApp {
                 let index = *index;
                 self.draw_show_capture(ui, rect, index);
             }
+            State::Choose { .. } => self.draw_choose(ui, rect),
             State::Processing => {
                 centered_text(ui, rect, "Making your photos...", 72.0, Color32::WHITE);
             }
@@ -431,7 +529,10 @@ impl BoothApp {
         painter.rect_filled(rect, 0.0, BACKGROUND);
         let show_preview = !matches!(
             self.state,
-            State::ShowCapture { .. } | State::Review { .. } | State::Processing
+            State::ShowCapture { .. }
+                | State::Choose { .. }
+                | State::Review { .. }
+                | State::Processing
         );
         if !show_preview {
             return;
@@ -550,7 +651,7 @@ impl BoothApp {
     }
 
     fn draw_show_capture(&self, ui: &egui::Ui, rect: Rect, index: u32) {
-        if let Some(texture) = &self.capture_texture {
+        if let Some(texture) = self.capture_textures.get(index as usize) {
             let target = fit(rect, texture.size_vec2());
             ui.painter()
                 .image(texture.id(), target, FULL_UV, Color32::WHITE);
@@ -564,16 +665,116 @@ impl BoothApp {
         );
     }
 
+    /// Every photo in a grid; tapping one toggles its retake mark. The button
+    /// below reshoots the marked ones, or saves when none are marked.
+    fn draw_choose(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let (area, button_rect) = review_layout(rect);
+        let title_height = rect.height() * 0.09;
+        ui.painter().text(
+            pos2(rect.center().x, area.top() + title_height / 2.0),
+            Align2::CENTER_CENTER,
+            "Tap any photo to retake it",
+            FontId::proportional(40.0),
+            Color32::WHITE,
+        );
+        let grid_area = Rect::from_min_max(pos2(area.left(), area.top() + title_height), area.max);
+        let aspect = self
+            .capture_textures
+            .first()
+            .map_or(16.0 / 9.0, TextureHandle::aspect_ratio);
+        let tiles = tile_grid(
+            grid_area,
+            self.capture_textures.len(),
+            aspect,
+            rect.height() * 0.02,
+        );
+
+        let mut toggled = None;
+        for (index, (tile, texture)) in tiles.iter().zip(&self.capture_textures).enumerate() {
+            let target = fit(*tile, texture.size_vec2());
+            let painter = ui.painter();
+            painter.image(texture.id(), target, FULL_UV, Color32::WHITE);
+            let badge = target.left_top() + vec2(28.0, 28.0);
+            painter.circle_filled(badge, 20.0, Color32::from_black_alpha(160));
+            painter.text(
+                badge,
+                Align2::CENTER_CENTER,
+                format!("{}", index + 1),
+                FontId::proportional(26.0),
+                Color32::WHITE,
+            );
+            if self.retake.get(index).copied().unwrap_or(false) {
+                painter.rect_filled(target, 0.0, Color32::from_black_alpha(140));
+                painter.rect_stroke(target, 0.0, Stroke::new(6.0, ACCENT), StrokeKind::Inside);
+                painter.text(
+                    target.center(),
+                    Align2::CENTER_CENTER,
+                    "Retake",
+                    FontId::proportional(40.0),
+                    ACCENT,
+                );
+            }
+            let id = ui.id().with(("retake", index));
+            if ui.interact(target, id, egui::Sense::click()).clicked() {
+                toggled = Some(index);
+            }
+        }
+        if let Some(marked) = toggled.and_then(|index| self.retake.get_mut(index)) {
+            *marked = !*marked;
+            // Still deciding: keep the screen up.
+            self.state = State::Choose {
+                until: self.choice_deadline(),
+            };
+        }
+
+        let discard_rect = Rect::from_min_size(
+            pos2(rect.left() + rect.height() * 0.03, button_rect.top()),
+            Vec2::new(rect.width() * 0.25, button_rect.height()),
+        );
+        let discard_label = if self.discard_pending() {
+            "Tap again to discard"
+        } else {
+            "Discard all"
+        };
+        if ui
+            .put(
+                discard_rect,
+                egui::Button::new(RichText::new(discard_label).size(26.0).color(DANGER)),
+            )
+            .clicked()
+        {
+            self.press_discard();
+            return;
+        }
+
+        let marked = self.retake.iter().filter(|marked| **marked).count();
+        let label = match marked {
+            0 => "Looks good".to_string(),
+            1 => "Retake 1 photo".to_string(),
+            count => format!("Retake {count} photos"),
+        };
+        if ui
+            .put(
+                button_rect,
+                egui::Button::new(RichText::new(label).size(36.0)),
+            )
+            .clicked()
+        {
+            if marked == 0 {
+                self.start_processing();
+            } else {
+                self.start_retakes();
+            }
+        }
+    }
+
     fn draw_review(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let (sheet_area, done_rect) = review_layout(rect);
         if let Some(texture) = &self.sheet_texture {
-            let target = fit(rect.shrink(rect.height() * 0.06), texture.size_vec2());
+            let target = fit(sheet_area, texture.size_vec2());
             ui.painter()
                 .image(texture.id(), target, FULL_UV, Color32::WHITE);
         }
-        let done_rect = Rect::from_center_size(
-            pos2(rect.center().x, rect.bottom() - rect.height() * 0.06),
-            Vec2::new(rect.width() * 0.3, rect.height() * 0.09),
-        );
         if ui
             .put(
                 done_rect,
@@ -592,7 +793,7 @@ impl BoothApp {
             Align2::CENTER_CENTER,
             message,
             FontId::proportional(36.0),
-            Color32::from_rgb(255, 120, 120),
+            DANGER,
         );
         let ok_rect = Rect::from_center_size(
             pos2(rect.center().x, rect.center().y + rect.height() * 0.2),
@@ -664,6 +865,62 @@ fn upload_texture(
     }
 }
 
+/// Review screen: the area the sheet is fitted into, and the Done button in
+/// its own band below it, so the button never covers the sheet's footer.
+fn review_layout(rect: Rect) -> (Rect, Rect) {
+    let margin = rect.height() * 0.03;
+    let button_size = Vec2::new(rect.width() * 0.3, rect.height() * 0.09);
+    let done_rect = Rect::from_center_size(
+        pos2(
+            rect.center().x,
+            rect.bottom() - margin - button_size.y / 2.0,
+        ),
+        button_size,
+    );
+    let sheet_area = Rect::from_min_max(
+        rect.min + Vec2::splat(margin),
+        pos2(rect.right() - margin, done_rect.top() - margin),
+    );
+    (sheet_area, done_rect)
+}
+
+/// Rects for `count` tiles of `aspect` (width / height) in `area`, using the
+/// column count that makes the tiles largest. Each row is centred.
+fn tile_grid(area: Rect, count: usize, aspect: f32, gap: f32) -> Vec<Rect> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let tile_size = |columns: usize| {
+        let rows = count.div_ceil(columns);
+        let width = (area.width() - gap * (columns - 1) as f32) / columns as f32;
+        let height = (area.height() - gap * (rows - 1) as f32) / rows as f32;
+        let width = width.min(height * aspect).max(0.0);
+        Vec2::new(width, width / aspect)
+    };
+    let columns = (1..=count)
+        .max_by(|&a, &b| tile_size(a).x.total_cmp(&tile_size(b).x))
+        .unwrap_or(1);
+    let size = tile_size(columns);
+    let rows = count.div_ceil(columns);
+    let grid_height = size.y * rows as f32 + gap * (rows - 1) as f32;
+    let top = area.center().y - grid_height / 2.0;
+    (0..count)
+        .map(|index| {
+            let (row, column) = (index / columns, index % columns);
+            let in_row = (count - row * columns).min(columns);
+            let row_width = size.x * in_row as f32 + gap * (in_row - 1) as f32;
+            let left = area.center().x - row_width / 2.0;
+            Rect::from_min_size(
+                pos2(
+                    left + column as f32 * (size.x + gap),
+                    top + row as f32 * (size.y + gap),
+                ),
+                size,
+            )
+        })
+        .collect()
+}
+
 /// Largest rect with `content` aspect ratio that fits inside `outer`, centred.
 fn fit(outer: Rect, content: Vec2) -> Rect {
     if content.x <= 0.0 || content.y <= 0.0 {
@@ -691,6 +948,141 @@ fn centered_text(ui: &egui::Ui, rect: Rect, text: &str, size: f32, color: Color3
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{CameraBackend, DEFAULT_CONFIG_TOML};
+
+    /// Drive the state machine the way `ui` does, minus drawing, until `done`.
+    fn run_until(app: &mut BoothApp, ctx: &egui::Context, done: impl Fn(&State) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !done(&app.state) {
+            assert!(Instant::now() < deadline, "stuck in {:?}", app.state);
+            app.drain_camera_events(ctx);
+            app.poll_processing(ctx);
+            app.advance();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn retakes_replace_only_the_marked_photos() {
+        let output_dir = std::env::temp_dir().join(format!(
+            "rsbooth-ui-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut config: Config = toml::from_str(DEFAULT_CONFIG_TOML).unwrap();
+        config.general.output_dir = output_dir.clone();
+        config.general.font = None;
+        config.camera.backend = CameraBackend::Mock;
+        config.camera.preview_resolution = [160, 90];
+        config.camera.capture_resolution = [320, 180];
+        config.countdown.seconds = 0;
+        config.countdown.between_captures_seconds = 0.0;
+        config.countdown.capture_review_seconds = 0.0;
+        config.modes[0].sheet = [400, 1200];
+        config.modes[0].footer_height = 100;
+        let shots = config.modes[0].captures as usize;
+
+        let ctx = egui::Context::default();
+        let mut app = BoothApp::new(config).unwrap();
+        app.start_session(0);
+        run_until(&mut app, &ctx, |state| {
+            matches!(state, State::Choose { .. })
+        });
+        assert_eq!(app.captures.len(), shots);
+        assert_eq!(app.capture_textures.len(), shots);
+
+        // The mock's picture drifts over time, so a retake differs from the
+        // photo it replaces.
+        let originals = app.captures.clone();
+        app.retake[1] = true;
+        app.start_retakes();
+        run_until(&mut app, &ctx, |state| {
+            matches!(state, State::Choose { .. })
+        });
+        assert_eq!(app.captures.len(), shots);
+        assert_ne!(app.captures[1], originals[1]);
+        for index in (0..shots).filter(|&index| index != 1) {
+            assert_eq!(app.captures[index], originals[index], "photo {index}");
+        }
+        assert!(app.retake.iter().all(|marked| !marked));
+
+        // One tap on "Discard all" only asks; nothing is dropped yet.
+        app.press_discard();
+        assert!(matches!(app.state, State::Choose { .. }));
+        assert_eq!(app.captures.len(), shots);
+
+        app.start_processing();
+        run_until(&mut app, &ctx, |state| {
+            matches!(state, State::Review { .. })
+        });
+        let session_dir = app.last_session_dir.clone().unwrap();
+        assert!(session_dir.join("sheet.jpg").exists());
+        assert!(session_dir.join(format!("capture_{shots}.jpg")).exists());
+        assert!(
+            !session_dir
+                .join(format!("capture_{}.jpg", shots + 1))
+                .exists()
+        );
+
+        std::fs::remove_dir_all(&output_dir).ok();
+    }
+
+    #[test]
+    fn the_done_button_sits_below_the_sheet() {
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), Vec2::new(1280.0, 800.0));
+        let (sheet_area, done_rect) = review_layout(screen);
+        assert!(sheet_area.bottom() < done_rect.top());
+        assert!(screen.contains_rect(sheet_area) && screen.contains_rect(done_rect));
+        // A tall strip fills the sheet area's height and still clears the button.
+        let strip = fit(sheet_area, Vec2::new(1200.0, 3600.0));
+        assert!(strip.bottom() <= done_rect.top());
+    }
+
+    #[test]
+    fn discard_needs_a_second_tap() {
+        let mut config: Config = toml::from_str(DEFAULT_CONFIG_TOML).unwrap();
+        config.general.output_dir = std::env::temp_dir();
+        config.camera.backend = CameraBackend::Mock;
+        let mut app = BoothApp::new(config).unwrap();
+        app.captures = vec![RgbImage::new(4, 4); 2];
+        app.retake = vec![false; 2];
+        app.state = State::Choose {
+            until: Instant::now() + Duration::from_secs(30),
+        };
+
+        app.press_discard();
+        assert!(matches!(app.state, State::Choose { .. }));
+        assert_eq!(app.captures.len(), 2);
+
+        app.press_discard();
+        assert!(matches!(app.state, State::Idle));
+        assert!(app.captures.is_empty());
+    }
+
+    #[test]
+    fn four_wide_photos_tile_two_by_two() {
+        let area = Rect::from_min_size(pos2(0.0, 0.0), Vec2::new(1280.0, 600.0));
+        let tiles = tile_grid(area, 4, 16.0 / 9.0, 10.0);
+        assert_eq!(tiles.len(), 4);
+        assert_eq!(tiles[0].top(), tiles[1].top());
+        assert!(tiles[2].top() > tiles[0].bottom());
+        for (index, tile) in tiles.iter().enumerate() {
+            assert!(area.contains_rect(*tile), "{tile:?}");
+            for other in &tiles[index + 1..] {
+                assert!(!tile.intersects(*other), "{tile:?} overlaps {other:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_short_last_row_is_centred() {
+        let area = Rect::from_min_size(pos2(0.0, 0.0), Vec2::new(1000.0, 1000.0));
+        let tiles = tile_grid(area, 3, 1.0, 0.0);
+        assert!((tiles[2].center().x - area.center().x).abs() < 0.01);
+        assert!(tile_grid(area, 0, 1.0, 0.0).is_empty());
+    }
 
     #[test]
     fn fit_preserves_the_aspect_ratio() {

@@ -16,10 +16,15 @@ with an egui touchscreen UI instead of a Python/pygame stack.
 3. **Countdown** - a per-shot countdown, then the shutter.
 4. **Capture** - the still is grabbed from the already-running
    capture-resolution stream (see [Shutter timing](#shutter-timing)).
-5. **Compose** - captures are centre-cropped into the mode's grid, drawn onto
+5. **Choose** - every photo is shown in a grid; tap any to mark it for retake,
+   then "Retake N photos" reshoots just those and comes back here. "Looks
+   good" - or `retake_choice_seconds` without a tap - moves on. "Discard all"
+   (tap twice) drops the session unsaved. Nothing is written to disk before
+   this point.
+6. **Compose** - captures are centre-cropped into the mode's grid, drawn onto
    the sheet with margins, gaps, an optional footer and an optional PNG overlay.
-6. **Save** - `<output_dir>/<timestamp>_<mode-id>/capture_N.jpg` plus
-   `sheet.jpg`.
+7. **Save** - `<output_dir>/<timestamp>_<mode-id>/capture_N.jpg` plus
+   `sheet.jpg`, then the sheet is shown until "Done" or `review_seconds`.
 
 ## Shutter timing
 
@@ -181,7 +186,7 @@ before anyone poses, not after.
   `capture_resolution`, `format`, `warmup_frames`, `capture_discard_frames`,
   `rotation`, `mirror` (preview and saved photos alike).
 - `[countdown]` - `seconds`, `between_captures_seconds`,
-  `capture_review_seconds`, `review_seconds`.
+  `capture_review_seconds`, `retake_choice_seconds`, `review_seconds`.
 - `[[modes]]` - one per selectable layout: `captures`, `columns`, `sheet`
   size, `margin`, `gap`, `background`, `footer_height`, `footer_text`,
   `footer_color`, `overlay`.
