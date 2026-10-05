@@ -53,6 +53,9 @@ const MOCK_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 /// unarmed pays it at the shutter.
 const MOCK_ARM_DELAY: Duration = Duration::from_millis(1200);
 
+/// [`decode_mjpeg`] scale, in eighths, for a full-size decode.
+const FULL_SCALE: u8 = 8;
+
 /// Frame rate requested from the device. Cameras negotiate the closest match.
 const REQUESTED_FPS: u32 = 30;
 
@@ -94,6 +97,9 @@ pub enum CameraEvent {
 #[derive(Debug)]
 pub struct Capture {
     pub image: RgbImage,
+    /// `image` at preview size for the screen, made on the camera thread so
+    /// the UI does not stall shrinking it.
+    pub preview: RgbImage,
     /// The driver's capture timestamp when the backend gives one, so a frame
     /// that sat in a queue is not mistaken for a fresh one; otherwise the
     /// moment the frame came back from the driver.
@@ -264,8 +270,8 @@ fn with_preview_decoder(
     })
 }
 
-/// Decode, shrink and orient the newest offered frame until `pending` is
-/// closed.
+/// Decode and orient the newest offered frame at preview size until
+/// `pending` is closed.
 fn decode_previews(
     pending: &PendingFrame,
     config: &config::Camera,
@@ -273,11 +279,10 @@ fn decode_previews(
 ) {
     let mut sequence = 0u64;
     while let Some(buffer) = pending.take() {
-        match decode_buffer(&buffer) {
+        match decode_preview(&buffer) {
             Ok(image) => {
                 sequence += 1;
-                // Shrinking first leaves less to orient.
-                let image = orient(layout::thumbnail(image, MAX_PREVIEW_EDGE), config);
+                let image = orient(image, config);
                 *preview_slot.lock().expect("preview slot poisoned") = Some(PreviewFrame {
                     image,
                     seq: sequence,
@@ -483,8 +488,10 @@ fn grab(camera: &mut nokhwa::Camera, config: &config::Camera) -> Result<Capture>
         .map_err(|e| anyhow!("reading the capture frame: {e}"))?;
     let taken_at = stamped_at(&buffer).unwrap_or_else(Instant::now);
     let image = decode_buffer(&buffer).context("decoding the capture frame")?;
+    let preview = decode_preview(&buffer).context("decoding the capture preview")?;
     Ok(Capture {
         image: orient(image, config),
+        preview: orient(preview, config),
         taken_at,
     })
 }
@@ -514,17 +521,14 @@ fn format_request(resolution: [u32; 2], preference: PixelFormatPref) -> Requeste
     }
 }
 
-/// Decode a camera buffer to RGB8.
-///
-/// nokhwa decodes MJPEG only, and only with its `decoding` feature, so every
-/// other format is handled here regardless. See [`decode_mjpeg`] for the JPEG
-/// path.
+/// Decode a camera buffer to RGB8 at full size. See [`decode_mjpeg`] for the
+/// JPEG path.
 pub fn decode_buffer(buffer: &Buffer) -> Result<RgbImage> {
     let width = buffer.resolution().width();
     let height = buffer.resolution().height();
     let bytes = buffer.buffer();
     match buffer.source_frame_format() {
-        FrameFormat::MJPEG => decode_mjpeg(buffer),
+        FrameFormat::MJPEG => decode_mjpeg(bytes, FULL_SCALE),
         FrameFormat::YUYV => yuyv_to_rgb(bytes, width, height),
         FrameFormat::NV12 => nv12_to_rgb(bytes, width, height),
         FrameFormat::GRAY => gray_to_rgb(bytes, width, height),
@@ -533,23 +537,63 @@ pub fn decode_buffer(buffer: &Buffer) -> Result<RgbImage> {
     }
 }
 
-/// MJPEG decoding: mozjpeg's SIMD decoder with the `fast-jpeg` feature on, the
-/// pure-Rust `image` decoder otherwise.
-///
-/// Decoding a 720p frame on an aarch64 desktop core: 7.5ms pure-Rust, 2.5ms
-/// mozjpeg. A Pi core is several times slower again, so build with
-/// `--features fast-jpeg` (implied by `--features pi`) on that hardware.
-#[cfg(feature = "fast-jpeg")]
-fn decode_mjpeg(buffer: &Buffer) -> Result<RgbImage> {
-    buffer
-        .decode_image::<RgbFormat>()
-        .map_err(|error| anyhow!("decoding an MJPEG frame: {error}"))
+/// Decode a camera buffer for the screen: longest edge at most
+/// [`MAX_PREVIEW_EDGE`]. MJPEG frames are decoded straight at a reduced scale
+/// where the decoder supports it.
+fn decode_preview(buffer: &Buffer) -> Result<RgbImage> {
+    let image = match buffer.source_frame_format() {
+        FrameFormat::MJPEG => {
+            let resolution = buffer.resolution();
+            let longest_edge = resolution.width().max(resolution.height());
+            decode_mjpeg(buffer.buffer(), preview_scale(longest_edge))?
+        }
+        _ => decode_buffer(buffer)?,
+    };
+    Ok(layout::thumbnail(image, MAX_PREVIEW_EDGE))
 }
 
+/// The mildest power-of-two reduction, in eighths, that brings `longest_edge`
+/// within [`MAX_PREVIEW_EDGE`]. JPEG decoders implement these as cheap
+/// reduced-size inverse DCTs.
+fn preview_scale(longest_edge: u32) -> u8 {
+    [FULL_SCALE, 4, 2, 1]
+        .into_iter()
+        .find(|&eighths| longest_edge * u32::from(eighths) / 8 <= MAX_PREVIEW_EDGE)
+        .unwrap_or(1)
+}
+
+/// MJPEG decoding at `scale` eighths of full size: mozjpeg's SIMD decoder with
+/// the `fast-jpeg` feature on, the pure-Rust `image` decoder otherwise.
+///
+/// Decoding a 720p frame on an aarch64 desktop core: 7.5ms pure-Rust, 2.5ms
+/// mozjpeg. A 1080p preview frame there costs 26ms decoded in full and shrunk,
+/// 4.3ms decoded by mozjpeg at half scale. A Pi core is several times slower
+/// again, so build with `--features fast-jpeg` (implied by `--features pi`) on
+/// that hardware.
+#[cfg(feature = "fast-jpeg")]
+fn decode_mjpeg(bytes: &[u8], scale: u8) -> Result<RgbImage> {
+    // libjpeg reports corrupt data by unwinding, and webcams do send the odd
+    // broken frame.
+    std::panic::catch_unwind(|| -> std::io::Result<Option<RgbImage>> {
+        let mut decompress = mozjpeg::Decompress::new_mem(bytes)?;
+        decompress.scale(scale);
+        let mut started = decompress.rgb()?;
+        let (width, height) = (started.width() as u32, started.height() as u32);
+        let pixels = started.read_scanlines::<u8>()?;
+        started.finish()?;
+        Ok(RgbImage::from_raw(width, height, pixels))
+    })
+    .map_err(|_| anyhow!("decoding an MJPEG frame: the decoder panicked"))?
+    .context("decoding an MJPEG frame")?
+    .ok_or_else(|| anyhow!("MJPEG frame decoded to the wrong size"))
+}
+
+/// The pure-Rust decoder always decodes in full; [`decode_preview`] shrinks
+/// afterwards.
 #[cfg(not(feature = "fast-jpeg"))]
-fn decode_mjpeg(buffer: &Buffer) -> Result<RgbImage> {
+fn decode_mjpeg(bytes: &[u8], _scale: u8) -> Result<RgbImage> {
     Ok(
-        image::load_from_memory_with_format(buffer.buffer(), ImageFormat::Jpeg)
+        image::load_from_memory_with_format(bytes, ImageFormat::Jpeg)
             .context("decoding an MJPEG frame")?
             .to_rgb8(),
     )
@@ -695,9 +739,13 @@ fn run_mock(
                     config.capture_resolution[1],
                     started.elapsed().as_secs_f32(),
                 );
+                let taken_at = Instant::now();
+                let image = orient(image, config);
+                let preview = layout::thumbnail(image.clone(), MAX_PREVIEW_EDGE);
                 let _ = events.send(CameraEvent::Captured(Box::new(Capture {
-                    image: orient(image, config),
-                    taken_at: Instant::now(),
+                    image,
+                    preview,
+                    taken_at,
                 })));
                 continue;
             }
@@ -764,6 +812,54 @@ mod tests {
                 assert!(difference.abs() <= 12, "{expected:?} vs {actual:?}");
             }
         }
+    }
+
+    #[test]
+    fn preview_scale_is_the_mildest_reduction_that_fits() {
+        assert_eq!(preview_scale(1280), 8);
+        assert_eq!(preview_scale(1920), 4);
+        assert_eq!(preview_scale(3840), 2);
+        assert_eq!(preview_scale(20_000), 1);
+    }
+
+    /// Exercises whichever MJPEG decoder the current feature set selected.
+    #[test]
+    fn mjpeg_previews_fit_the_preview_edge() {
+        let source = RgbImage::from_pixel(2600, 16, image::Rgb([90, 120, 150]));
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90)
+            .encode_image(&source)
+            .unwrap();
+
+        let buffer = Buffer::new(Resolution::new(2600, 16), &jpeg, FrameFormat::MJPEG);
+        let preview = decode_preview(&buffer).unwrap();
+
+        assert!(preview.width() <= MAX_PREVIEW_EDGE, "{}", preview.width());
+        assert!(
+            preview.width() >= MAX_PREVIEW_EDGE / 2,
+            "{}",
+            preview.width()
+        );
+        let pixel = preview
+            .get_pixel(preview.width() / 2, preview.height() / 2)
+            .0;
+        for (expected, actual) in [90u8, 120, 150].into_iter().zip(pixel) {
+            assert!(
+                (i32::from(expected) - i32::from(actual)).abs() <= 8,
+                "{pixel:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn corrupt_mjpeg_is_an_error_not_a_panic() {
+        let buffer = Buffer::new(
+            Resolution::new(64, 32),
+            &[0xff, 0xd8, 1, 2, 3],
+            FrameFormat::MJPEG,
+        );
+        assert!(decode_buffer(&buffer).is_err());
+        assert!(decode_preview(&buffer).is_err());
     }
 
     #[test]
@@ -842,6 +938,7 @@ mod tests {
         let shutter_at = Instant::now();
         let capture = |taken_at| Capture {
             image: RgbImage::new(1, 1),
+            preview: RgbImage::new(1, 1),
             taken_at,
         };
         let after = capture(shutter_at + Duration::from_millis(40)).offset_ms(shutter_at);

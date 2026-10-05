@@ -17,6 +17,7 @@ eframe = { version = "0.36.1", default-features = false, features = [
     "x11",
 ] }
 image = "0.25.10"
+mozjpeg = { version = "0.10.13", optional = true }
 nokhwa = { version = "0.10.11", default-features = false, features = ["input-native"] }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.4"
@@ -34,9 +35,10 @@ wgpu = ["eframe/wgpu"]
 glow = ["eframe/glow"]
 
 # Decode MJPEG frames with mozjpeg (SIMD) instead of the pure-Rust decoder.
-# Roughly 2-4x faster, which matters on ARM. Needs NASM installed when
-# building for x86; ARM builds use GAS assembly and need no extra tool.
-fast-jpeg = ["nokhwa/decoding"]
+# Roughly 2-4x faster, and preview frames are decoded straight at reduced
+# size, which matters on ARM. Needs NASM installed when building for x86; ARM
+# builds use GAS assembly and need no extra tool.
+fast-jpeg = ["dep:mozjpeg"]
 
 # Everything recommended for a Raspberry Pi:
 #   cargo build --release --no-default-features --features pi

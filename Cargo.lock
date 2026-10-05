@@ -2667,7 +2667,6 @@ checksum = "b1cba20bebd3bd9ae22f9273ade5bbe49da3e047c8512b53fbaf8b4b9c80d496"
 dependencies = [
  "bytes",
  "image",
- "mozjpeg",
  "thiserror 2.0.20",
 ]
 
@@ -3775,6 +3774,7 @@ dependencies = [
  "dirs",
  "eframe",
  "image",
+ "mozjpeg",
  "nokhwa",
  "serde",
  "toml",

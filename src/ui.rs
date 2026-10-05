@@ -22,11 +22,7 @@ use image::RgbImage;
 
 use crate::camera::{CameraEvent, CameraHandle, Capture};
 use crate::config::{Config, Mode};
-use crate::layout;
 use crate::session::{self, ProcessRequest, Processed};
-
-/// Longest edge of a just-taken capture when shown on screen.
-const CAPTURE_PREVIEW_EDGE: u32 = 1280;
 
 /// How long the white capture flash lasts.
 const FLASH_DURATION: Duration = Duration::from_millis(220);
@@ -250,15 +246,13 @@ impl BoothApp {
                 "photo taken {offset_ms:+.0}ms from the end of the countdown"
             ));
         }
-        let image = capture.image;
-        let thumbnail = layout::thumbnail(image.clone(), CAPTURE_PREVIEW_EDGE);
         self.capture_texture = Some(upload_texture(
             ctx,
             self.capture_texture.take(),
             "capture",
-            &thumbnail,
+            &capture.preview,
         ));
-        self.captures.push(image);
+        self.captures.push(capture.image);
         if self.config.window.flash {
             self.flash_until = Some(Instant::now() + FLASH_DURATION);
         }

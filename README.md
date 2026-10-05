@@ -86,7 +86,7 @@ GPU or software GL stack at run time.
 | --- | --- | --- |
 | `wgpu` | yes | wgpu renderer (Vulkan / Metal / DX12 / GL) |
 | `glow` | no | OpenGL ES renderer, via glutin |
-| `fast-jpeg` | no | MJPEG decoding through mozjpeg's SIMD decoder instead of the pure-Rust one |
+| `fast-jpeg` | no | MJPEG decoding through mozjpeg's SIMD decoder instead of the pure-Rust one, with preview frames decoded straight at reduced size |
 | `pi` | no | `glow` + `fast-jpeg` |
 
 `fast-jpeg` needs **NASM** when building for x86 (`apt install nasm`). ARM
@@ -107,7 +107,10 @@ Why those features:
   desktop core: 7.5ms with the pure-Rust decoder, 2.5ms with mozjpeg's NEON
   one. A Pi core is several times slower again, which puts the pure-Rust path
   at or past the 33ms budget for a 30fps preview and mozjpeg comfortably
-  inside it.
+  inside it. While armed, mozjpeg also decodes each 1080p preview frame
+  straight at half size: 4.3ms on that core, against 26ms for a full decode
+  plus shrinking. That keeps the Pi's preview close to the moment the photo is
+  taken.
 
 Composition is not a bottleneck: a four-shot 1200x3600 sheet takes ~150ms of
 Lanczos3 resizing plus ~35ms of JPEG encoding on that same core, so roughly a
