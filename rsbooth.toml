@@ -1,0 +1,94 @@
+# rsbooth configuration.
+#
+# Search order when --config is not given:
+#   ./rsbooth.toml, then ~/.config/rsbooth/rsbooth.toml
+# `rsbooth init-config` writes this file to the user config directory.
+
+[general]
+# Session folders are created under here: <output_dir>/<timestamp>_<mode-id>/
+output_dir = "~/Pictures/rsbooth"
+idle_text = "Touch to start"
+# TTF/OTF used for footer text drawn into the sheet. Footer text is skipped
+# with a warning when this is unset or unreadable. This path is where Debian
+# and Raspberry Pi OS install DejaVu Sans Bold.
+font = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+[window]
+fullscreen = false
+size = [1280, 800]
+# Show the live preview mirrored (does not affect saved captures).
+mirror_preview = true
+# White flash at the moment of capture.
+flash = true
+
+[camera]
+# "webcam" = USB/UVC device, "mock" = synthetic frames (no hardware needed).
+backend = "webcam"
+# Device index from `rsbooth list-cameras`.
+index = 0
+preview_resolution = [1280, 720]
+# Stills are taken at this resolution; the stream is reconfigured around each
+# capture when it differs from preview_resolution.
+capture_resolution = [1920, 1080]
+# "mjpeg", "yuyv" or "any".
+format = "any"
+# Frames discarded right after the camera is armed, so exposure settles during
+# the countdown rather than at the shutter.
+warmup_frames = 4
+# Frames dropped at the shutter before the one that is kept, so the stored
+# frame was definitely exposed after the countdown reached zero.
+capture_discard_frames = 1
+# 0, 90, 180 or 270, clockwise.
+rotation = 0
+
+[countdown]
+# Also the lead time the camera gets to switch to the capture format, so keep
+# this at 2 seconds or more unless preview and capture resolutions match.
+seconds = 3
+between_captures_seconds = 1.5
+capture_review_seconds = 1.0
+review_seconds = 15.0
+
+# Modes are shown as buttons on the selection screen, in this order.
+
+[[modes]]
+id = "strip4"
+name = "Classic Strip"
+description = "4 shots, printed strip"
+captures = 4
+columns = 1
+sheet = [1200, 3600]
+margin = 48
+gap = 24
+background = "#ffffff"
+footer_height = 320
+footer_text = "rsbooth"
+footer_color = "#111111"
+# overlay = "~/Pictures/rsbooth/overlay.png"
+
+[[modes]]
+id = "grid4"
+name = "Quad"
+description = "4 shots in a square"
+captures = 4
+columns = 2
+sheet = [2400, 2400]
+margin = 60
+gap = 30
+background = "#111111"
+footer_height = 260
+footer_text = "rsbooth"
+footer_color = "#f5f5f5"
+
+[[modes]]
+id = "single"
+name = "Single Shot"
+description = "One high-quality photo"
+captures = 1
+columns = 1
+sheet = [2400, 1600]
+margin = 40
+gap = 0
+background = "#ffffff"
+footer_height = 0
+footer_text = ""

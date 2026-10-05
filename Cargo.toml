@@ -1,0 +1,43 @@
+[package]
+name = "rsbooth"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ab_glyph = "0.2.32"
+anyhow = "1.0.104"
+chrono = "0.4.45"
+clap = { version = "4.6.6", features = ["derive"] }
+dirs = "6.0.0"
+eframe = { version = "0.36.1", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "links",
+    "wayland",
+    "x11",
+] }
+image = "0.25.10"
+nokhwa = { version = "0.10.11", default-features = false, features = ["input-native"] }
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.4"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[features]
+# Desktop default: the wgpu renderer (Vulkan / Metal / DX12 / GL).
+default = ["wgpu"]
+
+wgpu = ["eframe/wgpu"]
+
+# OpenGL ES renderer. Lighter and better supported than Vulkan on the
+# Raspberry Pi's V3D driver.
+glow = ["eframe/glow"]
+
+# Decode MJPEG frames with mozjpeg (SIMD) instead of the pure-Rust decoder.
+# Roughly 2-4x faster, which matters on ARM. Needs NASM installed when
+# building for x86; ARM builds use GAS assembly and need no extra tool.
+fast-jpeg = ["nokhwa/decoding"]
+
+# Everything recommended for a Raspberry Pi:
+#   cargo build --release --no-default-features --features pi
+pi = ["glow", "fast-jpeg"]
