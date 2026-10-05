@@ -118,6 +118,7 @@ Suggested config on a Pi:
 ```toml
 [window]
 fullscreen = true
+hide_cursor = true
 
 [camera]
 # USB webcams stream MJPEG; YUYV at 720p will not fit in USB 2.0 bandwidth.
@@ -129,6 +130,21 @@ capture_resolution = [1920, 1080]
 **Camera support:** rsbooth talks V4L2, which covers USB webcams. The CSI
 camera modules on current Pi OS (Bookworm and later) go through libcamera and
 are *not* reachable this way - `rsbooth list-cameras` will not show them.
+
+**Starting at boot:** with desktop autologin on (`raspi-config` > System
+Options > Boot / Auto Login), add `~/.config/autostart/rsbooth.desktop`:
+
+```ini
+[Desktop Entry]
+Type=Application
+Name=rsbooth
+Exec=/home/pi/rsbooth --config /home/pi/rsbooth.toml run
+```
+
+Autostart does not run from your home directory, hence the explicit
+`--config`. Also turn screen blanking off (`raspi-config` > Display Options >
+Screen Blanking), or the idle screen goes dark. **Esc** on the idle screen quits
+back to the desktop.
 
 ## Usage
 
@@ -142,7 +158,8 @@ rsbooth capture --mode strip4  # one session, headless: shoot, compose, save
 `--config <path>` overrides the config search order, which is `./rsbooth.toml`,
 then `~/.config/rsbooth/rsbooth.toml`.
 
-Keyboard: **Space/Enter** starts a session, **Esc** cancels one.
+Keyboard: **Space/Enter** starts a session, **Esc** cancels one. **Esc** on the
+idle screen quits back to the desktop.
 
 `RSBOOTH_LOG` sets the log filter (default `rsbooth=info,warn`); an invalid
 filter is an error.
@@ -156,10 +173,10 @@ before anyone poses, not after.
 
 - `[general]` - `output_dir`, `idle_text`, and `font` (a TTF/OTF path used for
   footer text; footer text is skipped with a warning when it is unset).
-- `[window]` - `fullscreen`, `size`, `mirror_preview`, `flash`.
+- `[window]` - `fullscreen`, `hide_cursor`, `size`, `flash`.
 - `[camera]` - `backend` (`webcam` or `mock`), `index`, `preview_resolution`,
   `capture_resolution`, `format`, `warmup_frames`, `capture_discard_frames`,
-  `rotation`.
+  `rotation`, `mirror` (preview and saved photos alike).
 - `[countdown]` - `seconds`, `between_captures_seconds`,
   `capture_review_seconds`, `review_seconds`.
 - `[[modes]]` - one per selectable layout: `captures`, `columns`, `sheet`

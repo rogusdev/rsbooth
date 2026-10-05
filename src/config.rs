@@ -88,12 +88,11 @@ impl Default for General {
 pub struct Window {
     #[serde(default)]
     pub fullscreen: bool,
+    /// Hide the mouse pointer over the booth, for touchscreen kiosks.
+    #[serde(default)]
+    pub hide_cursor: bool,
     #[serde(default = "Window::default_size")]
     pub size: [f32; 2],
-    /// Mirror the live preview so users see themselves as in a mirror. Does
-    /// not affect the saved captures.
-    #[serde(default = "default_true")]
-    pub mirror_preview: bool,
     /// White flash overlay at the moment of capture.
     #[serde(default = "default_true")]
     pub flash: bool,
@@ -109,8 +108,8 @@ impl Default for Window {
     fn default() -> Self {
         Self {
             fullscreen: false,
+            hide_cursor: false,
             size: Self::default_size(),
-            mirror_preview: true,
             flash: true,
         }
     }
@@ -156,9 +155,13 @@ pub struct Camera {
     /// kept frame was exposed after the countdown reached zero.
     #[serde(default = "Camera::default_discard_frames")]
     pub capture_discard_frames: u32,
-    /// Rotate captures clockwise: 0, 90, 180 or 270.
+    /// Rotate the preview and the photos clockwise: 0, 90, 180 or 270.
     #[serde(default)]
     pub rotation: u32,
+    /// Flip the preview and the photos left to right, as in a mirror, after
+    /// rotating. The saved files match what was on screen.
+    #[serde(default = "default_true")]
+    pub mirror: bool,
 }
 
 impl Camera {
@@ -193,6 +196,7 @@ impl Default for Camera {
             warmup_frames: Self::default_warmup_frames(),
             capture_discard_frames: Self::default_discard_frames(),
             rotation: 0,
+            mirror: true,
         }
     }
 }

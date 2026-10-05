@@ -55,6 +55,9 @@ const MODE_SELECT_TIMEOUT: Duration = Duration::from_secs(60);
 /// the countdown smooth without spinning the GPU.
 const REPAINT_INTERVAL: Duration = Duration::from_millis(16);
 
+/// Texture coordinates covering a whole texture.
+const FULL_UV: Rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+
 const BACKGROUND: Color32 = Color32::from_rgb(12, 12, 16);
 const ACCENT: Color32 = Color32::from_rgb(255, 214, 102);
 
@@ -354,9 +357,10 @@ impl BoothApp {
                 input.key_pressed(egui::Key::Escape),
             )
         });
+        // Esc backs out one level: a session to idle, idle to the desktop.
         if cancel {
             match self.state {
-                State::Idle => {}
+                State::Idle => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                 _ => self.cancel_session(),
             }
         }
@@ -417,6 +421,9 @@ impl eframe::App for BoothApp {
         }
         self.draw_flash(ui, rect);
         self.draw_status(ui, rect);
+        if self.config.window.hide_cursor {
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+        }
 
         ctx.request_repaint_after(REPAINT_INTERVAL);
     }
@@ -438,12 +445,7 @@ impl BoothApp {
         match &self.preview_texture {
             Some(texture) => {
                 let target = fit(rect, texture.size_vec2());
-                painter.image(
-                    texture.id(),
-                    target,
-                    preview_uv(self.config.window.mirror_preview),
-                    Color32::WHITE,
-                );
+                painter.image(texture.id(), target, FULL_UV, Color32::WHITE);
             }
             None => {
                 let message = match &self.camera_fatal {
@@ -556,12 +558,8 @@ impl BoothApp {
     fn draw_show_capture(&self, ui: &egui::Ui, rect: Rect, index: u32) {
         if let Some(texture) = &self.capture_texture {
             let target = fit(rect, texture.size_vec2());
-            ui.painter().image(
-                texture.id(),
-                target,
-                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
+            ui.painter()
+                .image(texture.id(), target, FULL_UV, Color32::WHITE);
         }
         ui.painter().text(
             pos2(rect.center().x, rect.bottom() - rect.height() * 0.08),
@@ -575,12 +573,8 @@ impl BoothApp {
     fn draw_review(&mut self, ui: &mut egui::Ui, rect: Rect) {
         if let Some(texture) = &self.sheet_texture {
             let target = fit(rect.shrink(rect.height() * 0.06), texture.size_vec2());
-            ui.painter().image(
-                texture.id(),
-                target,
-                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
+            ui.painter()
+                .image(texture.id(), target, FULL_UV, Color32::WHITE);
         }
         let done_rect = Rect::from_center_size(
             pos2(rect.center().x, rect.bottom() - rect.height() * 0.06),
@@ -685,15 +679,6 @@ fn fit(outer: Rect, content: Vec2) -> Rect {
     Rect::from_center_size(outer.center(), content * scale)
 }
 
-/// Horizontally flipped UV when the preview is mirrored.
-fn preview_uv(mirror: bool) -> Rect {
-    if mirror {
-        Rect::from_min_max(pos2(1.0, 0.0), pos2(0.0, 1.0))
-    } else {
-        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))
-    }
-}
-
 fn scrim(ui: &egui::Ui, rect: Rect) {
     ui.painter()
         .rect_filled(rect, 0.0, Color32::from_black_alpha(170));
@@ -720,13 +705,5 @@ mod tests {
         assert!((fitted.width() - 800.0).abs() < 0.01);
         assert!((fitted.height() - 450.0).abs() < 0.01);
         assert_eq!(fitted.center(), outer.center());
-    }
-
-    #[test]
-    fn mirrored_uv_flips_horizontally() {
-        let uv = preview_uv(true);
-        assert_eq!(uv.min.x, 1.0);
-        assert_eq!(uv.max.x, 0.0);
-        assert_eq!(preview_uv(false).min.x, 0.0);
     }
 }

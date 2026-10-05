@@ -79,7 +79,8 @@ pub enum CameraEvent {
     /// The camera reached the capture format, and how long that took. A long
     /// time here is fine: it happened during the countdown.
     Armed { description: String, took: Duration },
-    /// A still finished. Full capture resolution, rotation already applied.
+    /// A still finished. Full capture resolution, rotation and mirroring
+    /// already applied.
     Captured(Box<Capture>),
     /// Capture failed but the thread is still alive.
     CaptureFailed(String),
@@ -137,14 +138,13 @@ impl CameraHandle {
         let join = std::thread::Builder::new()
             .name("rsbooth-camera".to_string())
             .spawn(move || {
-                let result = with_preview_decoder(config.rotation, &preview_slot, |pending| {
-                    match config.backend {
+                let result =
+                    with_preview_decoder(&config, &preview_slot, |pending| match config.backend {
                         CameraBackend::Webcam => {
                             run_webcam(&config, &command_rx, &event_tx, pending)
                         }
                         CameraBackend::Mock => run_mock(&config, &command_rx, &event_tx, pending),
-                    }
-                });
+                    });
                 if let Err(error) = result {
                     tracing::error!("camera thread stopped: {error:#}");
                     let _ = event_tx.send(CameraEvent::Fatal(format!("{error:#}")));
@@ -248,7 +248,7 @@ impl PendingFrame {
 /// it is given - alongside the preview decoder thread, and stop the decoder
 /// when the loop ends.
 fn with_preview_decoder(
-    rotation: u32,
+    config: &config::Camera,
     preview_slot: &Mutex<Option<PreviewFrame>>,
     stream: impl FnOnce(&PendingFrame) -> Result<()>,
 ) -> Result<()> {
@@ -256,7 +256,7 @@ fn with_preview_decoder(
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .name("rsbooth-preview".to_string())
-            .spawn_scoped(scope, || decode_previews(&pending, rotation, preview_slot))
+            .spawn_scoped(scope, || decode_previews(&pending, config, preview_slot))
             .expect("spawning the preview decoder thread");
         let result = stream(&pending);
         pending.close();
@@ -264,11 +264,11 @@ fn with_preview_decoder(
     })
 }
 
-/// Decode, shrink and rotate the newest offered frame until `pending` is
+/// Decode, shrink and orient the newest offered frame until `pending` is
 /// closed.
 fn decode_previews(
     pending: &PendingFrame,
-    rotation: u32,
+    config: &config::Camera,
     preview_slot: &Mutex<Option<PreviewFrame>>,
 ) {
     let mut sequence = 0u64;
@@ -276,8 +276,8 @@ fn decode_previews(
         match decode_buffer(&buffer) {
             Ok(image) => {
                 sequence += 1;
-                // Shrinking first leaves less to rotate.
-                let image = rotate(layout::thumbnail(image, MAX_PREVIEW_EDGE), rotation);
+                // Shrinking first leaves less to orient.
+                let image = orient(layout::thumbnail(image, MAX_PREVIEW_EDGE), config);
                 *preview_slot.lock().expect("preview slot poisoned") = Some(PreviewFrame {
                     image,
                     seq: sequence,
@@ -484,7 +484,7 @@ fn grab(camera: &mut nokhwa::Camera, config: &config::Camera) -> Result<Capture>
     let taken_at = stamped_at(&buffer).unwrap_or_else(Instant::now);
     let image = decode_buffer(&buffer).context("decoding the capture frame")?;
     Ok(Capture {
-        image: rotate(image, config.rotation),
+        image: orient(image, config),
         taken_at,
     })
 }
@@ -633,13 +633,19 @@ fn raw_to_rgb(bytes: &[u8], width: u32, height: u32, swap_red_blue: bool) -> Res
     RgbImage::from_raw(width, height, out).ok_or_else(|| anyhow!("raw frame had the wrong size"))
 }
 
-fn rotate(image: RgbImage, degrees: u32) -> RgbImage {
-    match degrees {
+/// Apply the configured rotation, then mirroring. Preview frames and stills
+/// both pass through here, so what is saved matches what was on screen.
+fn orient(image: RgbImage, config: &config::Camera) -> RgbImage {
+    let mut image = match config.rotation {
         90 => image::imageops::rotate90(&image),
         180 => image::imageops::rotate180(&image),
         270 => image::imageops::rotate270(&image),
         _ => image,
+    };
+    if config.mirror {
+        image::imageops::flip_horizontal_in_place(&mut image);
     }
+    image
 }
 
 /// Synthetic backend: a moving gradient. Lets the booth run end to end with no
@@ -690,7 +696,7 @@ fn run_mock(
                     started.elapsed().as_secs_f32(),
                 );
                 let _ = events.send(CameraEvent::Captured(Box::new(Capture {
-                    image: rotate(image, config.rotation),
+                    image: orient(image, config),
                     taken_at: Instant::now(),
                 })));
                 continue;
@@ -805,8 +811,12 @@ mod tests {
     fn the_decoder_publishes_rotated_previews_until_closed() {
         let pending = PendingFrame::default();
         let preview_slot = Mutex::new(None);
+        let config = config::Camera {
+            rotation: 90,
+            ..config::Camera::default()
+        };
         std::thread::scope(|scope| {
-            scope.spawn(|| decode_previews(&pending, 90, &preview_slot));
+            scope.spawn(|| decode_previews(&pending, &config, &preview_slot));
             pending.offer(Buffer::new(
                 Resolution::new(4, 2),
                 &[7; 4 * 2 * 3],
@@ -838,6 +848,25 @@ mod tests {
         assert!((after - 40.0).abs() < 0.5, "{after}");
         let before = capture(shutter_at - Duration::from_millis(300)).offset_ms(shutter_at);
         assert!((before + 300.0).abs() < 0.5, "{before}");
+    }
+
+    #[test]
+    fn mirroring_flips_after_rotating() {
+        // Left pixel red, right pixel blue.
+        let image = RgbImage::from_raw(2, 1, vec![255, 0, 0, 0, 0, 255]).unwrap();
+        let mut config = config::Camera {
+            mirror: true,
+            ..config::Camera::default()
+        };
+        let mirrored = orient(image.clone(), &config);
+        assert_eq!(mirrored.get_pixel(0, 0).0, [0, 0, 255]);
+
+        // Rotated 90 degrees the pixels stack vertically, so mirroring has
+        // nothing to swap.
+        config.rotation = 90;
+        let rotated = orient(image, &config);
+        assert_eq!((rotated.width(), rotated.height()), (1, 2));
+        assert_eq!(rotated.get_pixel(0, 0).0, [255, 0, 0]);
     }
 
     #[test]

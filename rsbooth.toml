@@ -15,9 +15,9 @@ font = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
 [window]
 fullscreen = false
+# Hide the mouse pointer over the booth (touchscreen kiosks).
+hide_cursor = false
 size = [1280, 800]
-# Show the live preview mirrored (does not affect saved captures).
-mirror_preview = true
 # White flash at the moment of capture.
 flash = true
 
@@ -40,6 +40,9 @@ warmup_frames = 4
 capture_discard_frames = 1
 # 0, 90, 180 or 270, clockwise.
 rotation = 0
+# Flip left to right, as in a mirror. Applies to the preview, the photo shown
+# after each shot and the saved files alike, so they always match.
+mirror = true
 
 [countdown]
 # Also the lead time the camera gets to switch to the capture format, so keep
